@@ -17,25 +17,24 @@ import glob
 # Opening "Sites_Cartoradio" file from pc directory 
 df_sites = pd.read_csv('~/Documents/University/TelecomSudParis/PIR/cartoradio_ParisArea_06-11-25/Sites_Cartoradio.csv',
                  delimiter=';', encoding='latin1')
-#print(df_sites.head())
 
-# # Converting to library frame
-# gdf = gpd.GeoDataFrame(
-#     df_sites, geometry=gpd.points_from_xy(df_sites.Longitude, df_sites.Latitude), crs="EPSG:4326"
-# )
+# Converting to library frame
+gdf = gpd.GeoDataFrame(
+    df_sites, geometry=gpd.points_from_xy(df_sites.Longitude, df_sites.Latitude), crs="EPSG:4326"
+)
 
-# # Downloading street network and converting its graph
-# G = ox.graph_from_place('Paris, France', network_type='drive')
-# edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
+# Downloading street network and converting its graph
+G = ox.graph_from_place('Paris, France', network_type='drive')
+edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
 
-# # Plot
-# fig, ax = plt.subplots(figsize=(10, 10))
-# edges.plot(ax=ax, linewidth=0.8, color='gray')
-# gdf.plot(ax=ax, color='red', markersize=10)
-# plt.title("Street Map of Paris with Cartoradio Sites")
-# plt.xlabel("Longitude")
-# plt.ylabel("Latitude")
-# plt.show()
+# Plot
+fig, ax = plt.subplots(figsize=(10, 10))
+edges.plot(ax=ax, linewidth=0.8, color='gray')
+gdf.plot(ax=ax, color='red', markersize=10)
+plt.title("Street Map of Paris with Cartoradio Sites")
+plt.xlabel("Longitude")
+plt.ylabel("Latitude")
+plt.show()
 
 # 2 - Preparing sites and antennas databases with selection and filtering ================================================================
 
@@ -88,18 +87,20 @@ df_antenne = df_antenne[((df_antenne['Exploitant'] == 'ORANGE') & df_antenne['D√
 df_sit_ant = df_antenne.merge(df_sites, on='Num√©ro de support', how="left")
 
 # Prints for checking
-# print(df_sites.head())
-# print(df_antenne.head())
-# print(df_sit_ant.head())
+print(df_sites.head())
+print(df_antenne.head())
+print(df_sit_ant.head())
 
 # 3 - Data exploitation from 5G data datasets =============================================================================================
+
+# 3.1 - Creating the dataset by combining the different file groups (ftp, video, voice, voip)
 
 # Selecting info to use in each 5G table
 info_5G = ['Packet Tech', 'Band', 'Sidelink Band', 'Energy mJ', 'Sidelink Energy mJ',
                     'Total Energy mJ', 'Data Mbit', 'Sidelink Data Mbit', 'Total Data Mbit', 
                     'OperatorName', 'RSSI (pcell)', 'RSSI (scell)']
 
-# Opening "data_5G" files from pc directory, from each group (ftp, video, voice, voip)
+# Opening "data_5G" files from pc directory, from each group
 files_5G = {
     'ftp' : '~/Documents/University/TelecomSudParis/PIR/data_5G/FTP/*5G*.csv',
     'video' : '~/Documents/University/TelecomSudParis/PIR/data_5G/Video/*5G*.csv',
@@ -107,10 +108,11 @@ files_5G = {
     'voip' : '~/Documents/University/TelecomSudParis/PIR/data_5G/VOIP/*5G*.csv'
 }
 
+# Building the datasets with the corresponding files, and the specific columns for each
 datasets_5G = {}
 for key, pattern in files_5G.items():
-    pattern = os.path.expanduser(pattern)
-    files = sorted(glob.glob(pattern))
+    pattern = os.path.expanduser(pattern) # Use the os to acess a compatible file path
+    files = sorted(glob.glob(pattern)) # The glob just gets the files, but they need to be sorted alphabetically
     dfs = []
     for f in files:
         df = pd.read_csv(f)
@@ -118,14 +120,5 @@ for key, pattern in files_5G.items():
         dfs.append(df[common_cols])
     datasets_5G[key] = dfs
 
-# Check the first FTP dataset
+# Check the first FTP dataset, for example
 print(datasets_5G['ftp'][0].head())
-
-# pd.read_csv('~/Documents/University/TelecomSudParis/PIR/data_5G/FTP/No001_p1_5G.csv',
-#                  delimiter=',', encoding='latin1')
-
-# Selecting specific columns
-# df_5G_ftp = df_5G_ftp[['Packet Tech', 'Band', 'Sidelink Band', 'Energy mJ', 'Sidelink Energy mJ',
-#                        'Total Energy mJ', 'Data Mbit', 'Sidelink Data Mbit', 'Total Data Mbit', 
-#                        'OperatorName', 'RSSI (pcell)', 'RSSI (scell)']]
-
