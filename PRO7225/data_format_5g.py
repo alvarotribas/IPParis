@@ -11,12 +11,19 @@ import geopandas as gpd
 import osmnx as ox
 import os
 import glob
+import re
 
 # 1 - Opening map files, display and plot ===============================================================================================
 
 # Opening "Sites_Cartoradio" file from pc directory 
 df_sites = pd.read_csv('~/Documents/University/TelecomSudParis/PIR/cartoradio_ParisArea_06-11-25/Sites_Cartoradio.csv',
                  delimiter=';', encoding='latin1')
+
+# Defining delimitating latitudes and longitudes of the sites area
+lat_max_sites = df_sites['Latitude'].max()
+lat_min_sites = df_sites['Latitude'].min()
+long_max_sites = df_sites['Longitude'].max()
+long_min_sites = df_sites['Longitude'].min()
 
 # Converting to library frame
 gdf = gpd.GeoDataFrame(
@@ -28,9 +35,9 @@ G = ox.graph_from_place('Paris, France', network_type='drive')
 edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
 
 # Plot
-fig, ax = plt.subplots(figsize=(10, 10))
-edges.plot(ax=ax, linewidth=0.8, color='gray')
-gdf.plot(ax=ax, color='red', markersize=10)
+fig, ax = plt.subplots(figsize=(10, 6))
+edges.plot(ax=ax, linewidth=0.7, color='gray')
+gdf.plot(ax=ax, color='red', markersize=8)
 plt.title("Street Map of Paris with Cartoradio Sites")
 plt.xlabel("Longitude")
 plt.ylabel("Latitude")
@@ -117,12 +124,21 @@ for key, pattern in files_5G.items():
     pattern = os.path.expanduser(pattern) # Use the os to acess a compatible file path
     files = sorted(glob.glob(pattern)) # The glob just gets the files, but they need to be sorted alphabetically
     dfs = []
-    for idx, f in enumerate(files):
+    for f in files:
         df = pd.read_csv(f)
         common_cols = [col for col in info_5G if col in df.columns]
         df = df[common_cols]
         df.insert(0, "File type", key) # Add column with file type (ftp, ...) in the beginning
-        df.insert(1, 'File ID', f"{key}_{idx}") # Add auxiliary column with ID number to allow for ordering later
+        # Extracting filename charactersitics based on "NoXXX_pY_5G.csv" name
+        filename = os.path.basename(f)
+        match = re.search(r'No(\d+)_p(\d+)_5G.csv', filename)
+        if match:
+            no_val = match.group(1) # = X
+            p_val = match.group(2) # = Y
+            file_id = f'{key}_{no_val}_{p_val}'
+        else:
+            file_id = f'{key}_{filename}'
+        df.insert(1, 'File ID', file_id) # Add column with ID number to allow for ordering later
         dfs.append(df)
     datasets_5G[key] = dfs
 
@@ -145,7 +161,6 @@ complete_table = pd.concat(dfs_table)
 
 # Checking if all numbers are represented as numbers and not as strings (in particular for RSRP data)
 rsrp_cols = ['RSRP (pcell).1', 'RSRP (scell).1']
-
 for col in rsrp_cols:
     complete_table[col] = pd.to_numeric(complete_table[col], errors='coerce')
 
@@ -167,8 +182,6 @@ for col in num_column:
 for col in str_column:
     merged_5g[col] = lambda x: x.mode().iloc[0] if not x.mode().empty else None # For columns with strings, select the most frequent
 
-# Converting every RSRP value back to dB after sum
-
 # 3.3 - Building the final table to use in training
 # A big table with all the merged information is built first, and then final adjustments are made
 
@@ -186,14 +199,86 @@ for col in rsrp_cols:
 final_table[final_table.eq(0)] = np.nan # Turning all zeros into empty information 
 final_table = final_table.dropna() # Excluding rows with empty information
 
-# Ordering (according to file type, and then file ID)
-final_table['File type'] = pd.Categorical(final_table['File type'], categories=order_criteria, ordered=True)
-final_table['File Order'] = final_table['File ID'].str.extract(r'_(\d+)$').astype(int)
+# Ordering according to file type
+final_table[['File type', 'No_val', 'p_val']] = final_table['File ID'].str.extract(r'([a-z]+)_(\d+)_(\d+)$')
+final_table['No_val'] = final_table['No_val'].astype('Int64') # Auxiliary column to sort in terms of No_val
+final_table['p_val'] = final_table['p_val'].astype('Int64') # Auxiliary column to sort in terms of p_val
 
 # Final table (in order)
-final_table = final_table.sort_values(['File type', 'File Order', 'Packet Tech', 'Band', 'Sidelink Band'])
-final_table = final_table.drop(columns=['File Order']) # Remove auxiliary column
+final_table = final_table.sort_values(['File type', 'No_val', 'p_val', 'Packet Tech', 'Band', 'Sidelink Band'])
+final_table = final_table.drop(columns=['No_val', 'p_val']) # Remove auxiliary columns 
 
 # Print final table for check
 print(final_table.head(12)) # Arbitrary number of rows
 print("\n")
+
+# 4 - Combining measurement description to Cartoradio map ================================================================================
+
+# Opening "measurements_notes.csv" to get measurement location info
+df_notes = pd.read_csv('~/Documents/University/TelecomSudParis/PIR/data_5G/Measurements/measurements_notes.csv',
+                 delimiter=',', encoding='latin1')
+
+# 4.1 - Formatting columns and rows
+
+# Filtering columns of interest 
+info_notes = ['Latitude', 'Longitude', 'Input Filename']
+df_notes = df_notes[info_notes]
+
+# Filtering rows of interest
+df_notes = df_notes[(~df_notes['Input Filename'].str.contains('_4G.csv')) & # Exclude all 4g files, keeping only 5g
+                    (df_notes['Latitude'].between(lat_min_sites, lat_max_sites)) & # Limit measurements to the sites' area
+                    (df_notes['Longitude'].between(long_min_sites, long_max_sites))]
+
+# 4.2 - Adding latitude and longitude columns to the final table by comparing filename to file ID
+
+# Function to create matching ID
+def extract_id_from_filename(filename):
+    match = re.search(r'No(\d+)_p(\d+)_5G.csv', filename)
+    if match:
+        return f'{match.group(1)}_{match.group(2)}'
+    return None
+
+# Creating matching ID in df_notes
+df_notes['Match ID'] = df_notes['Input Filename'].apply(extract_id_from_filename)
+# Creating mathcin ID in final_table
+final_table['Match ID'] = final_table['File ID'].str.extract(r'[a-z]+_(\d+_\d+)$')[0]
+
+# Merging
+final_table = final_table.merge(df_notes[['Match ID', 'Latitude', 'Longitude']], on='Match ID', how='left')
+
+# Eliminating rows where there are NaN and auxiliary columns
+# Here, the NaN means there was no correspondence between the two tables, which serves to eliminate from final_table
+# all locations that are outside of the sites' area.
+final_table = final_table.dropna()
+final_table = final_table.drop(columns=['Match ID', 'File type'])
+
+# Check
+print(df_notes.head(20))
+print("\n")
+print(final_table.head(20))
+print('\n')
+
+# 4.3 - Plot of the Cartoradio map containing the measurement locations
+
+# Converting to library frame
+gdf_final = gpd.GeoDataFrame(
+    final_table, geometry=gpd.points_from_xy(final_table.Longitude, final_table.Latitude), crs="EPSG:4326"
+)
+
+# Downloading street network and converting its graph
+G = ox.graph_from_place('Paris, France', network_type='drive')
+edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
+
+# Plot
+fig, ax = plt.subplots(figsize=(10, 6))
+# Contour
+edges.plot(ax=ax, linewidth=0.7, color='gray', label='Streets')
+# Points
+gdf.plot(ax=ax, color='red', markersize=8, label='Cartoradio Sites')
+gdf_final.plot(ax=ax, color='blue', markersize=10, label='Measurement Points', marker='*')
+# Configuration
+plt.title("Street Map of Paris with Cartoradio Sites and Measurement Points")
+plt.xlabel("Longitude")
+plt.ylabel("Latitude")
+plt.legend()
+plt.show()
