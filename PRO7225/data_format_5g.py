@@ -12,6 +12,7 @@ import osmnx as ox
 import os
 import glob
 import re
+from scipy import spatial
 
 # 1 - Opening map files, display and plot ===============================================================================================
 
@@ -34,14 +35,14 @@ gdf = gpd.GeoDataFrame(
 G = ox.graph_from_place('Paris, France', network_type='drive')
 edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
 
-# Plot
-fig, ax = plt.subplots(figsize=(10, 6))
-edges.plot(ax=ax, linewidth=0.7, color='gray')
-gdf.plot(ax=ax, color='red', markersize=8)
-plt.title("Street Map of Paris with Cartoradio Sites")
-plt.xlabel("Longitude")
-plt.ylabel("Latitude")
-plt.show()
+# # Plot
+# fig, ax = plt.subplots(figsize=(10, 6))
+# edges.plot(ax=ax, linewidth=0.7, color='gray')
+# gdf.plot(ax=ax, color='red', markersize=8)
+# plt.title("Street Map of Paris with Cartoradio Sites")
+# plt.xlabel("Longitude")
+# plt.ylabel("Latitude")
+# plt.show()
 
 # 2 - Preparing sites and antennas databases with selection and filtering ================================================================
 
@@ -265,20 +266,109 @@ gdf_final = gpd.GeoDataFrame(
     final_table, geometry=gpd.points_from_xy(final_table.Longitude, final_table.Latitude), crs="EPSG:4326"
 )
 
-# Downloading street network and converting its graph
-G = ox.graph_from_place('Paris, France', network_type='drive')
-edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
+# # Plot
+# fig, ax = plt.subplots(figsize=(10, 6))
+# # Contour
+# edges.plot(ax=ax, linewidth=0.7, color='gray', label='Streets')
+# # Points
+# gdf.plot(ax=ax, color='red', markersize=8, label='Cartoradio Sites')
+# gdf_final.plot(ax=ax, color='blue', markersize=10, label='Measurement Points', marker='*')
+# # Configuration
+# plt.title("Street Map of Paris with Cartoradio Sites and Measurement Points")
+# plt.xlabel("Longitude")
+# plt.ylabel("Latitude")
+# plt.legend()
+# plt.show()
 
-# Plot
+# 4.4 - Calculating the distance from each measurement point to the nearest antenna
+# Since
+# a) the height of the antennas is in the order to 10^1 m, while the height of the measurement devices is 10^0 m and
+# b) it's assumed all points are within than 10^1 km from one another
+# the calculation of the distance will be a simple 2D euclidian
+
+# Converting the distance between two points on Earth in degrees to kilometers
+def haversine_distance(lat1, lon1, lat2, lon2):
+
+    # Convert to radians
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    
+    # Haversine formula
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+    c = 2 * np.arcsin(np.sqrt(a))
+    
+    # Radius of earth in kilometers
+    r = 6371
+
+    return c * r
+
+# Calculating distance based on haversine_distance
+def nearestDistance(df1, df2):
+
+    # Building KD-tree from first dataframe to facilitate finding nearest neighbor search (NNS)
+    tree = spatial.cKDTree(df1[['Latitude', 'Longitude']].values)
+    # Performing NNS from dataframe 2
+    distances, indices = tree.query(df2[['Latitude', 'Longitude']].values)
+
+    # Adding columns with the indices, latitudes, and longitudes of nearest points
+    result = df2.copy()
+    result['Nearest BS Index'] = df1.index[indices]
+    result['Nearest Latitude'] = df1.iloc[indices]['Latitude'].values
+    result['Nearest Longitude'] = df1.iloc[indices]['Longitude'].values
+
+    # Adding column with the corresponding distance to nearest (latitude, longitude)
+    result['Distance [km]'] = haversine_distance(
+        result['Latitude'].values,
+        result['Longitude'].values,
+        result['Nearest Latitude'].values,
+        result['Nearest Longitude'].values
+    )
+
+    # Drop auxiliary columns
+    # This can be done since the association of points will be done through coordinates
+    result = result.drop(columns=['Nearest BS Index'])
+
+    return result
+
+# Building the dataframe 
+min_distance_map = nearestDistance(df_sit_ant, final_table)
+print(min_distance_map.head())
+
+# Converting to library frame
+gdf_minDistance = gpd.GeoDataFrame(
+    min_distance_map, geometry=gpd.points_from_xy(min_distance_map.Longitude, min_distance_map.Latitude), crs="EPSG:4326"
+)
+
+# Plot with lines between measurement points and nearest BSs
 fig, ax = plt.subplots(figsize=(10, 6))
 # Contour
 edges.plot(ax=ax, linewidth=0.7, color='gray', label='Streets')
 # Points
 gdf.plot(ax=ax, color='red', markersize=8, label='Cartoradio Sites')
 gdf_final.plot(ax=ax, color='blue', markersize=10, label='Measurement Points', marker='*')
+# Drawing lines between corresponding points using coordinates
+for idx, row in gdf_minDistance.iterrows():
+    # Getting coordinates from columns of nearest latitude and longitude
+    nearest_lat = row['Nearest Latitude']  
+    nearest_lon = row['Nearest Longitude']  
+    distance = row['Distance [km]'] 
+    # Getting coordinates of both points
+    point1 = row.geometry  # Measurement point
+    point2_x = nearest_lon
+    point2_y = nearest_lat
+    # Drawing line
+    ax.plot([point1.x, point2_x], [point1.y, point2_y], 
+            color='green', linestyle='--', linewidth=0.8, alpha=0.6)
+    # # Adding distance label at midpoint
+    # mid_x = (point1.x + point2_x) / 2
+    # mid_y = (point1.y + point2_y) / 2
+    # ax.text(mid_x, mid_y, f'{distance:.0f}m',  # Adjust format as needed
+    #         fontsize=8, ha='center', va='bottom',
+    #         bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7, edgecolor='none'))
 # Configuration
 plt.title("Street Map of Paris with Cartoradio Sites and Measurement Points")
 plt.xlabel("Longitude")
 plt.ylabel("Latitude")
 plt.legend()
-plt.show()
+plt.show()    
