@@ -26,24 +26,6 @@ lat_min_sites = df_sites['Latitude'].min()
 long_max_sites = df_sites['Longitude'].max()
 long_min_sites = df_sites['Longitude'].min()
 
-# Converting to library frame
-gdf = gpd.GeoDataFrame(
-    df_sites, geometry=gpd.points_from_xy(df_sites.Longitude, df_sites.Latitude), crs="EPSG:4326"
-)
-
-# Downloading street network and converting its graph
-G = ox.graph_from_place('Paris, France', network_type='drive')
-edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
-
-# # Plot
-# fig, ax = plt.subplots(figsize=(10, 6))
-# edges.plot(ax=ax, linewidth=0.7, color='gray')
-# gdf.plot(ax=ax, color='red', markersize=8)
-# plt.title("Street Map of Paris with Cartoradio Sites")
-# plt.xlabel("Longitude")
-# plt.ylabel("Latitude")
-# plt.show()
-
 # 2 - Preparing sites and antennas databases with selection and filtering ================================================================
 
 # Opening "antenne" file from pc directory 
@@ -96,12 +78,20 @@ df_antenne = df_antenne[((df_antenne['Exploitant'] == 'ORANGE') & df_antenne['D√
 df_sit_ant = df_antenne.merge(df_sites, on='Num√©ro de support', how="left")
 
 # Prints for checking
+print("df_sites")
 print(df_sites.head())
 print("\n")
+print("df_antenne")
 print(df_antenne.head())
 print("\n")
+print("df_sit_ant")
 print(df_sit_ant.head())
 print("\n")
+
+# Converting sites and antennas to library frame to plot at the end
+gdf_sit_ant = gpd.GeoDataFrame(
+    df_sit_ant, geometry=gpd.points_from_xy(df_sit_ant.Longitude, df_sit_ant.Latitude), crs="EPSG:4326"
+)
 
 # 3 - Preparing table with information from 5G data datasets ===============================================================================
 
@@ -144,6 +134,7 @@ for key, pattern in files_5G.items():
     datasets_5G[key] = dfs
 
 # Check the first FTP dataset, for example
+print("Example for datasets_5G (FTP)")
 print(datasets_5G['ftp'][0].head())
 print("\n")
 
@@ -196,6 +187,17 @@ for col in rsrp_cols:
         final_table[col] = 10 * np.log10(final_table[linear_col])
         final_table = final_table.drop(columns=[linear_col]) # Removing the auxiliary linear column
 
+# Calculating transmit power columns from energy and duration columns
+# Main link
+if 'Energy mJ' in final_table.columns and 'Duration s' in final_table.columns:
+    final_table['Tx Power mW'] = final_table['Energy mJ'] / final_table['Duration s']
+# Sidelink
+if 'Sidelink Energy mJ' in final_table.columns and 'Duration s' in final_table.columns:
+    final_table['Sidelink Tx Power mW'] = final_table['Sidelink Energy mJ'] / final_table['Duration s']
+# Total
+if 'Total Energy mJ' in final_table.columns and 'Duration s' in final_table.columns:
+    final_table['Total Tx Power mW'] = final_table['Total Energy mJ'] / final_table['Duration s']
+
 # Filtering rows
 final_table[final_table.eq(0)] = np.nan # Turning all zeros into empty information 
 final_table = final_table.dropna() # Excluding rows with empty information
@@ -210,6 +212,7 @@ final_table = final_table.sort_values(['File type', 'No_val', 'p_val', 'Packet T
 final_table = final_table.drop(columns=['No_val', 'p_val']) # Remove auxiliary columns 
 
 # Print final table for check
+print("final_table")
 print(final_table.head(12)) # Arbitrary number of rows
 print("\n")
 
@@ -254,45 +257,31 @@ final_table = final_table.dropna()
 final_table = final_table.drop(columns=['Match ID', 'File type'])
 
 # Check
+print("df_notes")
 print(df_notes.head(20))
 print("\n")
+print("final_table, 2nd version")
 print(final_table.head(20))
 print('\n')
 
-# 4.3 - Plot of the Cartoradio map containing the measurement locations
-
-# Converting to library frame
+# Converting final table to library frame to plot at the end
 gdf_final = gpd.GeoDataFrame(
     final_table, geometry=gpd.points_from_xy(final_table.Longitude, final_table.Latitude), crs="EPSG:4326"
 )
 
-# # Plot
-# fig, ax = plt.subplots(figsize=(10, 6))
-# # Contour
-# edges.plot(ax=ax, linewidth=0.7, color='gray', label='Streets')
-# # Points
-# gdf.plot(ax=ax, color='red', markersize=8, label='Cartoradio Sites')
-# gdf_final.plot(ax=ax, color='blue', markersize=10, label='Measurement Points', marker='*')
-# # Configuration
-# plt.title("Street Map of Paris with Cartoradio Sites and Measurement Points")
-# plt.xlabel("Longitude")
-# plt.ylabel("Latitude")
-# plt.legend()
-# plt.show()
-
-# 4.4 - Calculating the distance from each measurement point to the nearest antenna
+# 4.3 - Calculating the distance from each measurement point to the nearest antenna
 # Since
 # a) the height of the antennas is in the order to 10^1 m, while the height of the measurement devices is 10^0 m and
 # b) it's assumed all points are within than 10^1 km from one another
-# the calculation of the distance will be a simple 2D euclidian
+# the calculation of the distance will be a simple 3D euclidian
 
-# Converting the distance between two points on Earth in degrees to kilometers
-def haversine_distance(lat1, lon1, lat2, lon2):
+# Converting the distance between two points on Earth in degrees to kilometers, including height
+def haversine_distance(lat1, lon1, lat2, lon2, h1=0, h2=0):
 
-    # Convert to radians
+    # Converting to radians
     lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
     
-    # Haversine formula
+    # Haversine formula for surface distance
     dlat = lat2 - lat1
     dlon = lon2 - lon1
     a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
@@ -301,7 +290,15 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     # Radius of earth in kilometers
     r = 6371
 
-    return c * r
+    # Horizontal distance
+    horizontal_distance = c * r
+    # Vertical distance (height difference in km)
+    vertical_distance = (h2 - h1) / 1000  # Convert meters to kilometers
+    
+    # Calculating 3D distance using Pythagorean theorem
+    total_distance = np.sqrt(horizontal_distance**2 + vertical_distance**2)
+
+    return total_distance
 
 # Calculating distance based on haversine_distance
 def nearestDistance(df1, df2):
@@ -316,37 +313,87 @@ def nearestDistance(df1, df2):
     result['Nearest BS Index'] = df1.index[indices]
     result['Nearest Latitude'] = df1.iloc[indices]['Latitude'].values
     result['Nearest Longitude'] = df1.iloc[indices]['Longitude'].values
+    result['Nearest Height'] = df1.iloc[indices]['Hauteur / sol'].values
 
     # Adding column with the corresponding distance to nearest (latitude, longitude)
     result['Distance [km]'] = haversine_distance(
         result['Latitude'].values,
         result['Longitude'].values,
         result['Nearest Latitude'].values,
-        result['Nearest Longitude'].values
+        result['Nearest Longitude'].values,
+        h1=1,  # df2 has constant height of 1m
+        h2=result['Nearest Height'].values  # df1 heights from 'Hauteur / sol'
     )
 
     # Drop auxiliary columns
-    # This can be done since the association of points will be done through coordinates
-    result = result.drop(columns=['Nearest BS Index'])
+    # This can be done since the association of points will be done through coordinates only
+    result = result.drop(columns=['Nearest BS Index', 'Nearest Height'])
 
     return result
 
-# Building the dataframe 
+# Building the minimum distance table
 min_distance_map = nearestDistance(df_sit_ant, final_table)
+
+# Check
+print("min_distance_map")
 print(min_distance_map.head())
+print("\n")
+
+# 5 - Filtering the nearest antennas by location and service band ==============================================================================
+
+# 5.1 - Eliminating the antennas that are indoors and combining information to minimum distance data
+# Assuming only outdoor antennas are making a connection due to difference in loss differences between environments
+
+# Opening "Locations.csv" to get measurement location info
+df_locations = pd.read_csv('~/Documents/University/TelecomSudParis/PIR/data_5G/Measurements/Locations.csv',
+                 delimiter=',', encoding='latin1')
+
+# Select rows with only measurements that are in Paris and outdoors (region of interest)
+df_locations = df_locations[df_locations['Ville'].isin(['Paris'])]
+df_locations = df_locations[df_locations['InOut'].isin(['Outdoor'])]
+
+# Select only column of interest from the table, which are the ones that contain info about the measurement ID
+df_locations = df_locations[['No of locations']]
+
+# Cross reference in the minimum distance table, selecting locations that fit the criteria
+min_distance_map['No'] = min_distance_map['File ID'].str.extract(r'_(\d+)_')[0]
+# Convert both to the same type (numeric) for proper matching
+min_distance_map['No'] = pd.to_numeric(min_distance_map['No'], errors='coerce')
+df_locations['No of locations'] = pd.to_numeric(df_locations['No of locations'], errors='coerce')
+# Filter final_table to keep only rows where 'No' exists in df_locations
+min_distance_map = min_distance_map[min_distance_map['No'].isin(df_locations['No of locations'])]
+
+# Drop auxiliary columns
+min_distance_map = min_distance_map.drop(columns=['No'])
+
+# Check
+print("min_distance_map in Paris outdoor")
+print(min_distance_map.head(12))
+print("\n")
 
 # Converting to library frame
 gdf_minDistance = gpd.GeoDataFrame(
     min_distance_map, geometry=gpd.points_from_xy(min_distance_map.Longitude, min_distance_map.Latitude), crs="EPSG:4326"
 )
 
+# 5.2 - Check if the antenna and BS are on the same operator, same band
+
+
+# 6 - Final plot of the map ==================================================================================================================
+# Showing the measurement spots and the antennas they're connected to based on the selected criteria
+
+# Downloading street network and converting its graph
+G = ox.graph_from_place('Paris, France', network_type='drive')
+edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
+
 # Plot with lines between measurement points and nearest BSs
 fig, ax = plt.subplots(figsize=(10, 6))
 # Contour
 edges.plot(ax=ax, linewidth=0.7, color='gray', label='Streets')
 # Points
-gdf.plot(ax=ax, color='red', markersize=8, label='Cartoradio Sites')
-gdf_final.plot(ax=ax, color='blue', markersize=10, label='Measurement Points', marker='*')
+gdf_sit_ant.plot(ax=ax, color='red', markersize=8, label='Cartoradio Sites')
+gdf_minDistance.plot(ax=ax, color='blue', markersize=10, label='Measurement Points', marker='*')
+
 # Drawing lines between corresponding points using coordinates
 for idx, row in gdf_minDistance.iterrows():
     # Getting coordinates from columns of nearest latitude and longitude
@@ -360,12 +407,7 @@ for idx, row in gdf_minDistance.iterrows():
     # Drawing line
     ax.plot([point1.x, point2_x], [point1.y, point2_y], 
             color='green', linestyle='--', linewidth=0.8, alpha=0.6)
-    # # Adding distance label at midpoint
-    # mid_x = (point1.x + point2_x) / 2
-    # mid_y = (point1.y + point2_y) / 2
-    # ax.text(mid_x, mid_y, f'{distance:.0f}m',  # Adjust format as needed
-    #         fontsize=8, ha='center', va='bottom',
-    #         bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7, edgecolor='none'))
+
 # Configuration
 plt.title("Street Map of Paris with Cartoradio Sites and Measurement Points")
 plt.xlabel("Longitude")
