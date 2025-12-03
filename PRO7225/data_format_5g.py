@@ -26,6 +26,11 @@ lat_min_sites = df_sites['Latitude'].min()
 long_max_sites = df_sites['Longitude'].max()
 long_min_sites = df_sites['Longitude'].min()
 
+# Converting to library frame
+gdf_sites = gpd.GeoDataFrame(
+    df_sites, geometry=gpd.points_from_xy(df_sites.Longitude, df_sites.Latitude), crs="EPSG:4326"
+)
+
 # 2 - Preparing sites and antennas databases with selection and filtering ================================================================
 
 # Opening "antenne" file from pc directory 
@@ -76,6 +81,16 @@ df_antenne = df_antenne[((df_antenne['Exploitant'] == 'ORANGE') & df_antenne['D�
 
 # 2.6 - Merging sites and antennas databases
 df_sit_ant = df_antenne.merge(df_sites, on='Numéro de support', how="left")
+
+# 2.7 - Dictionary to convert 'Système' tehcnology to numeral, and later match 'Band' representation
+systeme_sit_ant =  {
+        "GSM 900": 1, "UMTS 900": 2, "UMTS 2100": 3, "LTE 700": 4, "LTE 800": 5,
+        "LTE 1800": 6, "LTE 2100": 7, "LTE 2600": 8, "5G NR 3500": 9, "5G NR 2100": 10,
+        "5G NR 700": 11, "GSM 1800": 12,  # new references, not found in Jiang's code
+}
+df_sit_ant['Système'].replace(systeme_sit_ant, inplace=True)
+# Matching the data type to the 'Band' column later
+df_sit_ant['Système'] = df_sit_ant['Système'].astype('float64')
 
 # Prints for checking
 print("df_sites")
@@ -303,27 +318,48 @@ def haversine_distance(lat1, lon1, lat2, lon2, h1=0, h2=0):
 # Calculating distance based on haversine_distance
 def nearestDistance(df1, df2):
 
-    # Building KD-tree from first dataframe to facilitate finding nearest neighbor search (NNS)
-    tree = spatial.cKDTree(df1[['Latitude', 'Longitude']].values)
-    # Performing NNS from dataframe 2
-    distances, indices = tree.query(df2[['Latitude', 'Longitude']].values)
-
-    # Adding columns with the indices, latitudes, and longitudes of nearest points
+    # Make copy to later return the modifications without affecting the database
     result = df2.copy()
-    result['Nearest BS Index'] = df1.index[indices]
-    result['Nearest Latitude'] = df1.iloc[indices]['Latitude'].values
-    result['Nearest Longitude'] = df1.iloc[indices]['Longitude'].values
-    result['Nearest Height'] = df1.iloc[indices]['Hauteur / sol'].values
 
-    # Adding column with the corresponding distance to nearest (latitude, longitude)
-    result['Distance [km]'] = haversine_distance(
-        result['Latitude'].values,
-        result['Longitude'].values,
-        result['Nearest Latitude'].values,
-        result['Nearest Longitude'].values,
-        h1=1,  # df2 has constant height of 1m
-        h2=result['Nearest Height'].values  # df1 heights from 'Hauteur / sol'
-    )
+    # Initialize new columns with nearest point information
+    result['Nearest BS Index'] = None
+    result['Nearest Latitude'] = None
+    result['Nearest Longitude'] = None
+    result['Nearest Height'] = None
+    result['Distance [km]'] = None
+
+    # Finding the nearest point in df1 for each point in df2 by matching Band to Système
+    for idx, row in df2.iterrows():
+
+        # Filtering df1 to only include rows where Système matches Band
+        matching_bs = df1[df1['Système'] == row['Band']] 
+
+        # Building KD-tree from first dataframe to facilitate finding nearest neighbor search (NNS)
+        tree = spatial.cKDTree(matching_bs[['Latitude', 'Longitude']].values)
+        # Performing NNS from dataframe 2
+        distances, indices = tree.query([row['Latitude'], row['Longitude']])
+
+        # Now coming back to the original index from df1
+        nearest_bs_idx = matching_bs.index[indices] 
+
+        # Storing results so far
+        result.at[idx, 'Nearest BS Index'] = nearest_bs_idx
+        result.at[idx, 'Nearest Latitude'] = matching_bs.loc[nearest_bs_idx, 'Latitude']
+        result.at[idx, 'Nearest Longitude'] = matching_bs.loc[nearest_bs_idx, 'Longitude']
+        result.at[idx, 'Nearest Height'] = matching_bs.loc[nearest_bs_idx, 'Hauteur / sol']        
+
+        # Adding column with the corresponding distance to nearest (latitude, longitude)
+        result.at[idx, 'Distance [km]'] = haversine_distance(
+            row['Latitude'],
+            row['Longitude'],
+            result.at[idx, 'Nearest Latitude'],
+            result.at[idx, 'Nearest Longitude'],
+            h1=1,  # df2 has constant height of 1m
+            h2=result.at[idx, 'Nearest Height']  # df1 heights from 'Hauteur / sol'
+        )
+
+    # Drop rows where no matching BS was found
+    result = result.dropna(subset=['Nearest BS Index'])
 
     # Drop auxiliary columns
     # This can be done since the association of points will be done through coordinates only
@@ -387,7 +423,7 @@ G = ox.graph_from_place('Paris, France', network_type='drive')
 edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
 
 # Plot with lines between measurement points and nearest BSs
-fig, ax = plt.subplots(figsize=(10, 6))
+fig, ax = plt.subplots(figsize=(8, 6))
 # Contour
 edges.plot(ax=ax, linewidth=0.7, color='gray', label='Streets')
 # Points
@@ -396,20 +432,22 @@ gdf_minDistance.plot(ax=ax, color='blue', markersize=10, label='Measurement Poin
 
 # Drawing lines between corresponding points using coordinates
 for idx, row in gdf_minDistance.iterrows():
-    # Getting coordinates from columns of nearest latitude and longitude
-    nearest_lat = row['Nearest Latitude']  
-    nearest_lon = row['Nearest Longitude']  
-    distance = row['Distance [km]'] 
-    # Getting coordinates of both points
-    point1 = row.geometry  # Measurement point
-    point2_x = nearest_lon
-    point2_y = nearest_lat
-    # Drawing line
-    ax.plot([point1.x, point2_x], [point1.y, point2_y], 
-            color='green', linestyle='--', linewidth=0.8, alpha=0.6)
+    # Condition to check if the row has a valide nearest BS data (not NaN)
+    if pd.notna(row['Nearest Latitude']) and pd.notna(row['Nearest Longitude']):
+        # Getting coordinates from columns of nearest latitude and longitude
+        nearest_lat = row['Nearest Latitude']  
+        nearest_lon = row['Nearest Longitude']  
+        distance = row['Distance [km]'] 
+        # Getting coordinates of both points
+        point1 = row.geometry  # Measurement point
+        point2_x = nearest_lon
+        point2_y = nearest_lat
+        # Drawing line
+        ax.plot([point1.x, point2_x], [point1.y, point2_y], 
+                color='green', linestyle='--', linewidth=0.8, alpha=0.6)
 
 # Configuration
-plt.title("Street Map of Paris with Cartoradio Sites and Measurement Points")
+plt.title("Filtered Map with Cartoradio Sites and Measurement Points")
 plt.xlabel("Longitude")
 plt.ylabel("Latitude")
 plt.legend()
