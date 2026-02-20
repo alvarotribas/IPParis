@@ -1,6 +1,8 @@
 """
 PIR - Projet d'Initiation a la recherche @ Telecom Paris
 Code 01 - Processing of the data from the Cartoradio in the Paris region
+
+Author: Alvaro RIBAS
 """
 
 # 0 - Imports ===========================================================================================================================
@@ -42,7 +44,7 @@ df_antenne = pd.read_csv(
 df_sites = df_sites[['Numéro du support', 'Longitude', 'Latitude']]
 df_sites = df_sites.rename(columns={'Numéro du support' : 'Numéro de support'}) # Rename because of the difference in "du" vs "de"
 
-df_antenne = df_antenne[['Numéro de support', 'Date de mise en service', 'Exploitant', 'Hauteur / sol', 
+df_antenne = df_antenne[['Numéro de support', 'Date de mise en service', 'Exploitant','Azimut', 'Hauteur / sol', 
                          'Type service', 'Système', 'Début', 'Fin', 'Unité']]
 
 # Filtering antenna characteristics for training
@@ -59,13 +61,16 @@ df_antenne = df_antenne[df_antenne['Date de mise en service'] < lim_date]
 carriers = ['ORANGE', 'BOUYGUES', 'SFR', 'FREE MOBILE']
 df_antenne = df_antenne[df_antenne['Exploitant'].isin(carriers)]
 
-# 2.3 - Height with respect to ground level
+# 2.3 - Complete azimuth column with dumb value (360.0)
+df_antenne['Azimut'] = df_antenne['Azimut'].fillna(360.0)
+
+# 2.4 - Height with respect to ground level
 df_antenne = df_antenne[df_antenne['Hauteur / sol'] >= 0]
 
-# 2.4 - Type of service
+# 2.5 - Type of service
 df_antenne = df_antenne[df_antenne['Type service'].isin(['TEL MOBILE'])]
 
-# 2.5 - Selecting only downlink frequency bands
+# 2.6 - Selecting only downlink frequency bands
 # Reference is Wikipedia "Fréquences de téléphonie mobile en France"
 # Selection is done based on "Début" frequency
 # 1900 MHz frequency will be ignored (reserved to professional usage)
@@ -79,10 +84,10 @@ df_antenne = df_antenne[((df_antenne['Exploitant'] == 'ORANGE') & df_antenne['D�
                         ((df_antenne['Exploitant'] == 'SFR') & df_antenne['Début'].isin(dl_sfr)) |
                         ((df_antenne['Exploitant'] == 'FREE MOBILE') & df_antenne['Début'].isin(dl_free))]
 
-# 2.6 - Merging sites and antennas databases
+# 2.7 - Merging sites and antennas databases
 df_sit_ant = df_antenne.merge(df_sites, on='Numéro de support', how="left")
 
-# 2.7 - Dictionary to convert 'Système' tehcnology to numeral, and later match 'Band' representation
+# 2.8 - Dictionary to convert 'Système' tehcnology to numeral, and later match 'Band' representation
 systeme_sit_ant =  {
         "GSM 900": 1, "UMTS 900": 2, "UMTS 2100": 3, "LTE 700": 4, "LTE 800": 5,
         "LTE 1800": 6, "LTE 2100": 7, "LTE 2600": 8, "5G NR 3500": 9, "5G NR 2100": 10,
@@ -91,6 +96,9 @@ systeme_sit_ant =  {
 df_sit_ant['Système'].replace(systeme_sit_ant, inplace=True)
 # Matching the data type to the 'Band' column later
 df_sit_ant['Système'] = df_sit_ant['Système'].astype('float64')
+
+# Save
+df_sit_ant.to_csv('df_sites_antennas.csv', index=False)
 
 # Prints for checking
 print("df_sites")
@@ -269,7 +277,7 @@ final_table = final_table.merge(df_notes[['Match ID', 'Latitude', 'Longitude']],
 # Here, the NaN means there was no correspondence between the two tables, which serves to eliminate from final_table
 # all locations that are outside of the sites' area.
 final_table = final_table.dropna()
-final_table = final_table.drop(columns=['Match ID', 'File type'])
+final_table = final_table.drop(columns=['Match ID'])
 
 # Check
 print("df_notes")
@@ -331,8 +339,8 @@ def nearestDistance(df1, df2):
     # Finding the nearest point in df1 for each point in df2 by matching Band to Système
     for idx, row in df2.iterrows():
 
-        # Filtering df1 to only include rows where Système matches Band
-        matching_bs = df1[df1['Système'] == row['Band']] 
+        # Filtering df1 to only include rows where system matches band, and operators are the same
+        matching_bs = df1[(df1['Système'] == row['Band']) & (df1['Exploitant'] == row['OperatorName'])]
 
         # Building KD-tree from first dataframe to facilitate finding nearest neighbor search (NNS)
         tree = spatial.cKDTree(matching_bs[['Latitude', 'Longitude']].values)
@@ -402,18 +410,16 @@ min_distance_map = min_distance_map[min_distance_map['No'].isin(df_locations['No
 # Drop auxiliary columns
 min_distance_map = min_distance_map.drop(columns=['No'])
 
-# Check
+# Check and save as csv file
 print("min_distance_map in Paris outdoor")
 print(min_distance_map.head(12))
 print("\n")
+min_distance_map.to_csv('min_distance_map.csv', index=False)
 
 # Converting to library frame
 gdf_minDistance = gpd.GeoDataFrame(
     min_distance_map, geometry=gpd.points_from_xy(min_distance_map.Longitude, min_distance_map.Latitude), crs="EPSG:4326"
 )
-
-# 5.2 - Check if the antenna and BS are on the same operator, same band
-
 
 # 6 - Final plot of the map ==================================================================================================================
 # Showing the measurement spots and the antennas they're connected to based on the selected criteria
@@ -423,12 +429,17 @@ G = ox.graph_from_place('Paris, France', network_type='drive')
 edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
 
 # Plot with lines between measurement points and nearest BSs
-fig, ax = plt.subplots(figsize=(8, 6))
+plt.rcParams['text.usetex'] = True
+plt.rcParams['axes.labelsize'] = 13
+plt.rcParams['axes.titlesize'] = 14
+plt.rcParams['xtick.labelsize'] = 13
+plt.rcParams['ytick.labelsize'] = 13
+fig, ax = plt.subplots(figsize=(9, 6))
 # Contour
 edges.plot(ax=ax, linewidth=0.7, color='gray', label='Streets')
 # Points
-gdf_sit_ant.plot(ax=ax, color='red', markersize=8, label='Cartoradio Sites')
-gdf_minDistance.plot(ax=ax, color='blue', markersize=10, label='Measurement Points', marker='*')
+gdf_sit_ant.plot(ax=ax, color='red', markersize=10, label='Cartoradio Sites')
+gdf_minDistance.plot(ax=ax, color='blue', markersize=14, label='Measurement Points', marker='*')
 
 # Drawing lines between corresponding points using coordinates
 for idx, row in gdf_minDistance.iterrows():
@@ -444,10 +455,11 @@ for idx, row in gdf_minDistance.iterrows():
         point2_y = nearest_lat
         # Drawing line
         ax.plot([point1.x, point2_x], [point1.y, point2_y], 
-                color='green', linestyle='--', linewidth=0.8, alpha=0.6)
+                color='Green', linestyle='-', linewidth=1.5, alpha=1)
 
 # Configuration
-plt.title("Filtered Map with Cartoradio Sites and Measurement Points")
+plt.xticks()
+plt.title("Filtered Map with Connections Between UE and BS")
 plt.xlabel("Longitude")
 plt.ylabel("Latitude")
 plt.legend()
